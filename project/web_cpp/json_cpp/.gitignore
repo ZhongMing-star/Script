@@ -1,0 +1,67 @@
+# ======================================
+# C++ 编译输出目录（你的 build 文件夹）
+# ======================================
+/build/
+/bin/
+/obj/
+/out/
+cmake-build-*/
+
+# ======================================
+# CMake 自动生成的文件
+# ======================================
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+Makefile
+*.cmake
+
+# ======================================
+# 编译产生的可执行文件 / 库
+# ======================================
+*.o
+*.obj
+*.so
+*.so.*
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
+*.out
+*.app
+
+# ======================================
+# 日志、临时文件
+# ======================================
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ======================================
+# IDE / 编辑器配置（VS / CLion / VSCode）
+# ======================================
+.idea/
+.vscode/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.vs/
+*.code-workspace
+
+# ======================================
+# 第三方库不提交（可选）
+# 如果你用 git submodule 可以删掉
+# ======================================
+# /thirdparty/
