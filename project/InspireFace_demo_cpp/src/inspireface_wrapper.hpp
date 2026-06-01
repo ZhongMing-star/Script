@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <memory>
 
-#include "face_common.h"
+#include "face_common.hpp"
 
 class InspireFaceGlobal
 {
