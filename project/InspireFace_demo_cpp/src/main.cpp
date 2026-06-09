@@ -2,13 +2,13 @@
 #include <string>
 #include <inspireface.h>
 
-#include "face_common.h"
+#include "face_common.hpp"
 #include "inspireface_wrapper.hpp"
 
 int main()
 {
     const std::string test_img_path = "test.jpg";
-    const std::string model_pack_path = "/mnt/d/Data/code/Script/project/InspireFace_demo_cpp/source/models/Pikachu";
+    const std::string model_pack_path = "/mnt/d/Data/code/Script/project/InspireFace_demo_cpp/source/models/Megatron_TRT";
 
     // 全局初始化 SDK
     try

@@ -217,20 +217,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Large model files and binaries
-*.onnx
-*.pb
-*.trt
-Megatron_TRT
-*.tgz
-*.tar.gz
-
-# Third-party compiled libraries and archives  
-thirdparty/**/*.tgz
-thirdparty/**/*.tar.gz
-thirdparty/**/*.zip
-onnxruntime-linux-x64-gpu-*.tgz
-
-# CMake
-CMakeUserPresets.json
-CMakePresets.json
+thirdparty/onnxruntime-linux-x64-1.20.1/
+thirdparty/onnxruntime-linux-x64-gpu-1.20.1/
+resource/

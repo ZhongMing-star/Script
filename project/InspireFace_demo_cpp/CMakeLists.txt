@@ -4,9 +4,15 @@ set(CMAKE_CXX_STANDARD 17)
 
 
 # InspireFace SDK
-set(INSPIREFACE_ROOT ${CMAKE_SOURCE_DIR}/thirdparty/InspireFace)
-include_directories(${INSPIREFACE_ROOT}/include)
-link_directories(${INSPIREFACE_ROOT}/lib)
+
+find_path(INSPIREFACE_INCLUDE_DIR NAMES inspireface.h PATHS /usr/local/inspireface/include)
+include_directories(${INSPIREFACE_INCLUDE_DIR})
+
+# InspireFace SDK
+find_library(INSPIREFACE_LIB NAMES InspireFace PATHS /usr/local/inspireface/lib)
+if(NOT INSPIREFACE_LIB)
+  message(FATAL_ERROR "Not found InspireFace in /usr/local/inspireface/lib")
+endif()
 
 # OpenCV
 find_package(OpenCV REQUIRED)
@@ -16,13 +22,10 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 
 add_executable(InspireFace_demo_cpp 
     src/main.cpp
-    # 头文件可以加进来，方便 IDE 识别
-    src/face_common.h
-    src/inspireface_wrapper.hpp
 )
 
 target_link_libraries(InspireFace_demo_cpp 
-    InspireFace 
     ${OpenCV_LIBS}
+    ${INSPIREFACE_LIB}
 )
 

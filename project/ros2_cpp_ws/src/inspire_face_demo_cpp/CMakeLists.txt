@@ -41,7 +41,7 @@ add_executable(${PROJECT_NAME}
 # ========== Step4：链接库【统一PRIVATE关键字，规避target_link_libraries混用报错】 ==========
 find_library(INSPIREFACE_LIB NAMES inspireface PATHS /usr/local/inspireface/lib)
 if(NOT INSPIREFACE_LIB)
-message(FATAL_ERROR "Not found libinspireface.so in /usr/local/inspireface/lib")
+  message(FATAL_ERROR "Not found libinspireface.so in /usr/local/inspireface/lib")
 endif()
 # 第三方库、Eigen用 target_link_libraries + PRIVATE
 target_link_libraries(${PROJECT_NAME}
