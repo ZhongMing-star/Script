@@ -1,2 +1,2 @@
-mkdir build include src thirdparty config
-touch src/main.cpp CMakeLists.txt
+mkdir build include src thirdparty config resource
+touch src/main.cpp CMakeLists.txt README.md
