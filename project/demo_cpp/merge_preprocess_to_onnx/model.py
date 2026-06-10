@@ -162,7 +162,6 @@ class SCRFD:
         kpss_list = []
         input_size = tuple(img.shape[0:2][::-1])
         blob = img
-        # blob = cv2.dnn.blobFromImage(img, 1.0/self.input_std, input_size, (self.input_mean, self.input_mean, self.input_mean), swapRB=True)
         net_outs = self.session.run(self.output_names, {self.input_name : blob})
 
         input_height = img.shape[0]
@@ -191,19 +190,6 @@ class SCRFD:
             if key in self.center_cache:
                 anchor_centers = self.center_cache[key]
             else:
-                #solution-1, c style:
-                #anchor_centers = np.zeros( (height, width, 2), dtype=np.float32 )
-                #for i in range(height):
-                #    anchor_centers[i, :, 1] = i
-                #for i in range(width):
-                #    anchor_centers[:, i, 0] = i
-
-                #solution-2:
-                #ax = np.arange(width, dtype=np.float32)
-                #ay = np.arange(height, dtype=np.float32)
-                #xv, yv = np.meshgrid(np.arange(width), np.arange(height))
-                #anchor_centers = np.stack([xv, yv], axis=-1).astype(np.float32)
-
                 #solution-3:
                 anchor_centers = np.stack(np.mgrid[:height, :width][::-1], axis=-1).astype(np.float32)
                 #print(anchor_centers.shape)
@@ -228,8 +214,8 @@ class SCRFD:
                 kpss_list.append(pos_kpss)
         return scores_list, bboxes_list, kpss_list
 
-    def detect(self, img, input_size = None, max_num=0, metric='default'):
-        input_sizes = DEFAULT_DET_SIZES
+    def detect(self, img, input_size = (640, 640), max_num=0, metric='default'):
+        input_sizes = self._resolve_input_sizes(input_size)
         assert input_sizes
         pre_det_list = []
         kpss_det_list = []
@@ -255,25 +241,6 @@ class SCRFD:
         det = pre_det[keep, :]
         if kpss is not None:
             kpss = kpss[keep, :, :]
-        # if max_num > 0 and det.shape[0] > max_num:
-        #     area = (det[:, 2] - det[:, 0]) * (det[:, 3] -
-        #                                             det[:, 1])
-        #     img_center = img.shape[0] // 2, img.shape[1] // 2
-        #     offsets = np.vstack([
-        #         (det[:, 0] + det[:, 2]) / 2 - img_center[1],
-        #         (det[:, 1] + det[:, 3]) / 2 - img_center[0]
-        #     ])
-        #     offset_dist_squared = np.sum(np.power(offsets, 2.0), 0)
-        #     if metric=='max':
-        #         values = area
-        #     else:
-        #         values = area - offset_dist_squared * 2.0  # some extra weight on the centering
-        #     bindex = np.argsort(
-        #         values)[::-1]  # some extra weight on the centering
-        #     bindex = bindex[0:max_num]
-        #     det = det[bindex, :]
-        #     if kpss is not None:
-        #         kpss = kpss[bindex, :]
         return det, kpss
 
     def _detect_candidates(self, img, input_size):
@@ -289,6 +256,7 @@ class SCRFD:
         det_scale = float(new_height) / img.shape[0]
         resized_img = cv2.resize(img, (new_width, new_height))
         det_img = np.zeros( (input_size[1], input_size[0], 3), dtype=np.uint8 )
+        # 不是使用的两边填充， 使用的单边填充
         det_img[:new_height, :new_width, :] = resized_img
         end = time.time()
         print(f"resize time: {(end - start)*1000}")

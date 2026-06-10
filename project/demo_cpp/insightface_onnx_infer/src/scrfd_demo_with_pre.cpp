@@ -1,15 +1,15 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
-#include "SCRFD.h"
+#include "SCRFD_with_pre.h"
 #include <chrono>
 
 int main() {
-    std::string model_path = "/mnt/d/Data/code/Script/project/demo_cpp/merge_preprocess_to_onnx/model/det_500m_double_padding.onnx";
-    std::string image_path = "/mnt/d/Data/code/Script/project/demo_cpp/insightface_onnx_infer/resource/face3.jpg";
+    std::string model_path = "/mnt/d/Data/code/Script/project/demo_cpp/merge_preprocess_to_onnx/model/det_500m_with_pre.onnx";
+    std::string image_path = "/mnt/d/Data/code/Script/project/demo_cpp/insightface_onnx_infer/resource/face2.jpg";
     int i;
     // 使用 TensorRT 进行推理：SCRFD(model_path, intra_threads, use_gpu=true, use_tensorrt=true)
     // 如果要使用 CPU 推理，将最后两个参数改为 false, false
-    SCRFD detector(model_path, 1, false, false);  // true 表示启用 GPU + TensorRT
+    SCRFD_WITH_PRE detector(model_path, 1, false, false);  // true 表示启用 GPU + TensorRT
     std::cout << "[INFO] Model loaded successfully" << std::endl;
     cv::Mat img = cv::imread(image_path);
     if (img.empty()) {
@@ -17,7 +17,7 @@ int main() {
         return -1;
     }
     
-    for (i=0; i< 500; i++){
+    for (i=0; i< 1; i++){
         try {
             
             auto start = std::chrono::high_resolution_clock::now();
@@ -32,7 +32,7 @@ int main() {
                     << duration_ns << " ns | "
                     << duration_ms << " ms | "
                     << duration_s << " s" << std::endl;
-                    // std::cout << "[INFO] Detected " << results.size() << " faces" << std::endl;
+                    std::cout << "[INFO] Detected " << results.size() << " faces" << std::endl;
             
             for (const auto& det : results) {
                 if (det.score > 0.65){

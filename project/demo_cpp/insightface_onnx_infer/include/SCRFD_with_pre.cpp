@@ -1,17 +1,17 @@
-#include "SCRFD.h"
+#include "SCRFD_WITH_PRE.h"
 #include <iostream>
 #include <algorithm>
 #include <cmath>
 
-// SCRFD 构造函数：加载模型并初始化推理会话
-SCRFD::SCRFD(const std::string &model_path, int intra_threads, bool use_gpu, bool use_tensorrt)
+// SCRFD_WITH_PRE 构造函数：加载模型并初始化推理会话
+SCRFD_WITH_PRE::SCRFD_WITH_PRE(const std::string &model_path, int intra_threads, bool use_gpu, bool use_tensorrt)
     : use_gpu_(use_gpu), use_tensorrt_(use_tensorrt)
 {
     init_session(model_path, intra_threads, use_gpu);
 }
 
 // 初始化 ONNX Runtime 会话，支持 CPU、CUDA 和 TensorRT 推理
-void SCRFD::init_session(const std::string &model_path, int intra_threads, bool use_gpu)
+void SCRFD_WITH_PRE::init_session(const std::string &model_path, int intra_threads, bool use_gpu)
 {
     session_options_.SetIntraOpNumThreads(intra_threads);
     session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
@@ -142,7 +142,7 @@ void SCRFD::init_session(const std::string &model_path, int intra_threads, bool 
 }
 
 // 预处理输入图像：缩放、填充、RGB 归一化、NCHW 排序
-std::vector<float> SCRFD::preprocess(const cv::Mat &img, cv::Mat &resize_img, float &scale, float &dw, float &dh, bool do_resize)
+std::vector<uint8_t> SCRFD_WITH_PRE::preprocess(const cv::Mat &img, cv::Mat &resize_img, float &scale, float &dw, float &dh, bool do_resize)
 {
     int img_h = img.rows;
     int img_w = img.cols;
@@ -151,38 +151,29 @@ std::vector<float> SCRFD::preprocess(const cv::Mat &img, cv::Mat &resize_img, fl
 
     if (do_resize)
     {
-        // 计算原图和模型输入的宽高比，用于确定最优的缩放方式
-        float im_ratio = static_cast<float>(img_h) / img_w;                             // 原图宽高比
-        float model_ratio = static_cast<float>(input_size_.height) / input_size_.width; // 模型输入宽高比
+        // 计算原图和模型输入的宽高比，用于后续坐标逆变换
+        float im_ratio = static_cast<float>(img_h) / img_w;
+        float model_ratio = static_cast<float>(input_size_.height) / input_size_.width;
 
         int new_h, new_w;
         if (im_ratio > model_ratio)
         {
-            // 原图相对更高，按高度缩放以填满模型的高度
             new_h = input_size_.height;
             new_w = static_cast<int>(new_h / im_ratio);
         }
         else
         {
-            // 原图相对更宽，按宽度缩放以填满模型的宽度
             new_w = input_size_.width;
             new_h = static_cast<int>(new_w * im_ratio);
         }
 
-        // 记录缩放因子，用于后续将模型输出坐标映射回原图
+        // 内部预处理会在模型里执行 Resize/Pad，因此这里只记录映射关系
         scale = static_cast<float>(new_h) / img_h;
+        dw = 0.0f;
+        dh = 0.0f;
 
-        cv::Mat resized_tmp;
-        cv::resize(img, resized_tmp, cv::Size(new_w, new_h));
-
-        // 创建黑色背景（三通道 8 位无符号整数），然后将缩放后的图像居中填充
-        // 这样可以保持原图长宽比，同时填满模型所需的输入尺寸
-        resize_img = cv::Mat::zeros(input_size_.height, input_size_.width, CV_8UC3);
-        // 计算水平和竖直方向的填充偏移量
-        dw = (input_size_.width - new_w) / 2.0f;  // 水平填充距离（用于坐标逆变换）
-        dh = (input_size_.height - new_h) / 2.0f; // 竖直填充距离（用于坐标逆变换）
-        // 将缩放后的图像复制到目标图像的中心区域
-        resized_tmp.copyTo(resize_img(cv::Rect(static_cast<int>(dw), static_cast<int>(dh), new_w, new_h)));
+        // 传入原始图像，实际 resize/pad 由模型内的预处理节点完成
+        resize_img = img;
     }
     else
     {
@@ -194,40 +185,28 @@ std::vector<float> SCRFD::preprocess(const cv::Mat &img, cv::Mat &resize_img, fl
         target_w = img_w;
     }
 
-    // 色彩空间转换：OpenCV 默认使用 BGR，但大多数深度学习模型使用 RGB
-    cv::Mat rgb;
-    cv::cvtColor(resize_img, rgb, cv::COLOR_BGR2RGB);
-    // 转换为 32 位浮点数，便于数值运算
-    rgb.convertTo(rgb, CV_32F);
-    // 标准化处理：先减去均值（127.5），再除以标度（128.0）
-    // 这样将像素值从 [0, 255] 映射到 [-1, 1] 范围
-    rgb -= 127.5f;
-    rgb /= 128.0f;
-
-    // 计算输入张量所需的总元素数：1 个批次 × 3 个通道 × H × W
-    size_t input_size = 1 * 3 * target_h * target_w;
-    std::vector<float> input_tensor(input_size);
+    // 计算输入张量所需的总元素数：H × W × 3
+    size_t input_size = static_cast<size_t>(img_h) * img_w * 3;
+    std::cout << "input_size = " << input_size << std::endl;
+    std::vector<uint8_t> input_tensor(input_size);
     int idx = 0;
-    // ONNX Runtime 期望的数据排列为 NCHW 格式（批次、通道、高度、宽度）
-    // 即对于 RGB 图像，先填充所有红色像素，再填充绿色像素，最后填充蓝色像素
-    // OpenCV Mat 存储为 HWC 格式（高度、宽度、通道），需要重新排列
-    for (int c = 0; c < 3; ++c)
+    for (int h = 0; h < img_h; ++h)
     {
-        for (int h = 0; h < target_h; ++h)
+        const cv::Vec3b *row = img.ptr<cv::Vec3b>(h);
+        for (int w = 0; w < img_w; ++w)
         {
-            for (int w = 0; w < target_w; ++w)
+            for (int c = 0; c < 3; ++c)
             {
-                input_tensor[idx++] = rgb.at<cv::Vec3f>(h, w)[c];
+                input_tensor[idx++] = row[w][c];
             }
         }
     }
-
     return input_tensor;
 }
 
 // 从特征金字塔的单个层提取检测框、得分和关键点
 // 该方法处理模型输出的一个特征层，提取该层中得分高于阈值的所有检测框
-void SCRFD::processFeatureLayer(std::vector<Ort::Value> &outputs, size_t layer_idx,
+void SCRFD_WITH_PRE::processFeatureLayer(std::vector<Ort::Value> &outputs, size_t layer_idx,
                                 float scale, float dw, float dh, float threshold, const cv::Size &input_size, const cv::Size &original_size,
                                 std::vector<float> &all_scores, std::vector<float> &all_bboxes,
                                 std::vector<float> &all_landmarks)
@@ -260,7 +239,7 @@ void SCRFD::processFeatureLayer(std::vector<Ort::Value> &outputs, size_t layer_i
         float cy = ((i / 2) / grid_w) * stride; // 中心 Y 坐标
 
         // 从回归输出中读取边界框的四个边界值（相对于锚框中心的距离）
-        // SCRFD 的边界框表示方式：[左距离, 上距离, 右距离, 下距离]
+        // SCRFD_WITH_PRE 的边界框表示方式：[左距离, 上距离, 右距离, 下距离]
         float l = bboxes[i * 4] * stride;     // 左边界距离中心的距离
         float t = bboxes[i * 4 + 1] * stride; // 上边界距离中心的距离
         float r = bboxes[i * 4 + 2] * stride; // 右边界距离中心的距离
@@ -308,7 +287,7 @@ void SCRFD::processFeatureLayer(std::vector<Ort::Value> &outputs, size_t layer_i
 
 // 对所有候选框执行非极大值抑制（NMS）
 // 该方法根据 IoU 阈值过滤掉重叠过多的低分框，返回最终的检测结果
-std::vector<Detection> SCRFD::performNMS(const std::vector<float> &all_scores, const std::vector<float> &all_bboxes,
+std::vector<Detection> SCRFD_WITH_PRE::performNMS(const std::vector<float> &all_scores, const std::vector<float> &all_bboxes,
                                          const std::vector<float> &all_landmarks, float nms_threshold)
 {
     std::vector<Detection> results;
@@ -394,7 +373,7 @@ std::vector<Detection> SCRFD::performNMS(const std::vector<float> &all_scores, c
 }
 
 // 后处理模型输出，生成最终检测结果，包括 NMS 和关键点处理
-std::vector<Detection> SCRFD::postprocess(std::vector<Ort::Value> &outputs, float scale, float dw, float dh,
+std::vector<Detection> SCRFD_WITH_PRE::postprocess(std::vector<Ort::Value> &outputs, float scale, float dw, float dh,
                                           float threshold, float nms_threshold, const cv::Size &original_size, const cv::Size &input_size)
 {
     std::vector<float> all_scores;
@@ -418,7 +397,7 @@ std::vector<Detection> SCRFD::postprocess(std::vector<Ort::Value> &outputs, floa
 }
 
 // 执行检测：输入图片 -> 预处理 -> 推理 -> 后处理 的完整流程
-std::vector<Detection> SCRFD::detect(const cv::Mat &img, float threshold, float nms_threshold)
+std::vector<Detection> SCRFD_WITH_PRE::detect(const cv::Mat &img, float threshold, float nms_threshold)
 {
     if (img.empty())
     {
@@ -434,12 +413,12 @@ std::vector<Detection> SCRFD::detect(const cv::Mat &img, float threshold, float 
         // 第一步：预处理输入图像
         // 返回的 input_tensor 是 NCHW 格式的浮点数组
         // scale、dw、dh 用于后续将检测框坐标从模型输出映射回原图
-        auto input_tensor = preprocess(img, resize_img, scale, dw, dh, false);
+        auto input_tensor = preprocess(img, resize_img, scale, dw, dh, true);
 
         auto e1 = std::chrono::high_resolution_clock::now();
         // 第二步：准备 ONNX Runtime 推理所需的张量信息
         // 输入张量维度为 [1, 3, H, W]（批次大小、通道数、高、宽）
-        std::vector<int64_t> input_dims = {1, 3, resize_img.rows, resize_img.cols};
+        std::vector<int64_t> input_dims = {img.rows, img.cols, 3};
 
         // 创建内存信息对象，指定使用 CPU 内存和竞技场分配器
         // 竞技场分配器能提供更好的性能（预分配大块内存）
@@ -448,7 +427,7 @@ std::vector<Detection> SCRFD::detect(const cv::Mat &img, float threshold, float 
         auto e2 = std::chrono::high_resolution_clock::now();
         // 创建输入张量：将预处理后的数据包装成 ONNX 张量格式
         // 注意：这里不拷贝数据，而是直接使用内存指针（需要确保数据有效期内调用 Run）
-        auto input_mem = Ort::Value::CreateTensor<float>(
+        auto input_mem = Ort::Value::CreateTensor<uint8_t>(
             memory_info,
             input_tensor.data(), // 浮点数据指针
             input_tensor.size(), // 数据元素数量
@@ -469,7 +448,7 @@ std::vector<Detection> SCRFD::detect(const cv::Mat &img, float threshold, float 
         );
 
         // 第四步：后处理模型输出，生成最终的检测结果
-        auto res = postprocess(outputs, scale, dw, dh, threshold, nms_threshold, img.size(), resize_img.size());
+        auto res = postprocess(outputs, scale, dw, dh, threshold, nms_threshold, img.size(), input_size_);
 
         auto e3 = std::chrono::high_resolution_clock::now();
         std::cout << "总耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e3 - start).count() << " ms | "

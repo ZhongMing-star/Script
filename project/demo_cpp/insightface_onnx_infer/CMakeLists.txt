@@ -15,6 +15,7 @@ link_directories(${ONNXRUNTIME_ROOT}/lib)
 # 库文件
 add_library(scrfd_lib
     include/SCRFD.cpp
+    include/SCRFD_with_pre.cpp
 )
 target_include_directories(scrfd_lib PUBLIC include)
 target_link_libraries(scrfd_lib
@@ -26,3 +27,7 @@ target_link_libraries(scrfd_lib
 # SCRFD 测试程序
 add_executable(scrfd_demo src/scrfd_demo.cpp)
 target_link_libraries(scrfd_demo scrfd_lib)
+
+# SCRFD 测试程序
+add_executable(scrfd_demo_with_pre src/scrfd_demo_with_pre.cpp)
+target_link_libraries(scrfd_demo_with_pre scrfd_lib)

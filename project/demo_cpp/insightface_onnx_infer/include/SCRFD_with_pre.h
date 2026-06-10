@@ -11,18 +11,18 @@ struct Detection {
     std::vector<cv::Point2f> landmarks;
 };
 
-class SCRFD {
+class SCRFD_WITH_PRE {
 public:
     // use_gpu: 是否使用 GPU 进行推理，默认为 true（支持 CUDA）
     // use_tensorrt: 是否使用 ONNX Runtime TensorRT 执行提供程序进行加速
-    SCRFD(const std::string& model_path, int intra_threads = 1, bool use_gpu = true, bool use_tensorrt = false);
-    ~SCRFD() = default;
+    SCRFD_WITH_PRE(const std::string& model_path, int intra_threads = 1, bool use_gpu = true, bool use_tensorrt = false);
+    ~SCRFD_WITH_PRE() = default;
 
     std::vector<Detection> detect(const cv::Mat& img, float threshold = 0.5f, float nms_threshold = 0.4f);
 
 private:
     void init_session(const std::string& model_path, int intra_threads, bool use_gpu);
-    std::vector<float> preprocess(const cv::Mat& img, cv::Mat& resize_img, float& scale, float& dw, float& dh, bool do_resize = true);
+    std::vector<uint8_t> preprocess(const cv::Mat& img, cv::Mat& resize_img, float& scale, float& dw, float& dh, bool do_resize = true);
     std::vector<Detection> postprocess(std::vector<Ort::Value>& outputs, float scale, float dw, float dh, 
                                         float threshold, float nms_threshold, const cv::Size& original_size, const cv::Size& input_size);
     
@@ -36,7 +36,7 @@ private:
     std::vector<Detection> performNMS(const std::vector<float>& all_scores, const std::vector<float>& all_bboxes,
                                       const std::vector<float>& all_landmarks, float nms_threshold);
 
-    Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "SCRFD"};
+    Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "SCRFD_WITH_PRE"};
     Ort::Session session_{nullptr};
     Ort::SessionOptions session_options_;
 
