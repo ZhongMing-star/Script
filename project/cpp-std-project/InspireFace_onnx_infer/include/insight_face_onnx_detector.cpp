@@ -1,108 +1,33 @@
-#include "insight_face_onnx_infer.h"
+#include "insight_face_onnx_detector.h"
 
 #include <iostream>
 #include <algorithm>
 #include <cmath>
 
-InsightFaceOnnxInfer::InsightFaceOnnxInfer(const std::string &model_path, float threshold, float nms_threshold, int intra_threads, bool use_gpu, int device_id)
+// struct Detection_Result_Struct {
+struct Detection
+{
+    float x1, y1, x2, y2;
+    float score;
+    std::vector<cv::Point2f> landmarks;
+};
+
+InsightFaceOnnxDetector::InsightFaceOnnxDetector(const std::string &model_path, float threshold, float nms_threshold, int intra_threads, bool use_gpu, int device_id)
+    : BaseOnnxInfer(model_path, intra_threads, use_gpu, device_id)
 {
     // 初始化成员变量
-    m_model_path = model_path;
     m_threshold = threshold;
     m_nms_threshold = nms_threshold;
-    m_intra_threads = intra_threads;
-    m_use_gpu = use_gpu;
-    m_deivce_id = device_id;
-
-    // 初始化 session
-    init_session();
-    // 初始化模型
-    init_model();
 }
 
-void InsightFaceOnnxInfer::init_session()
-{
-    m_session_options.SetIntraOpNumThreads(m_intra_threads);
-    m_session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_BASIC);
-
-    if (m_use_gpu)
-    {
-        try
-        {
-            // 创建 CUDA provider 选项
-            OrtCUDAProviderOptions cuda_options;
-            // 使用第一块 GPU 设备
-            cuda_options.device_id = m_deivce_id;
-
-            // 将 CUDA provider 添加到会话选项中
-            // AppendExecutionProvider_CUDA 返回状态码，0 表示成功
-            m_session_options.AppendExecutionProvider_CUDA(cuda_options);
-            std::cout << "[INFO] GPU (CUDA) provider enabled for inference" << std::endl;
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "CUDA initialization failed: " << e.what() << std::endl;
-            m_use_gpu = false;
-        }
-    }
-
-    // 注：CPU provider 是 ONNX Runtime 的默认后备方案
-    // 当 CUDA 不可用时，ONNX Runtime 会自动回退到 CPU 推理
-    try
-    {
-        m_session = Ort::Session(m_env, m_model_path.c_str(), m_session_options);
-    }
-    catch (const std::exception &e)
-    {
-        std::cerr << "[ERROR] Load model failed: " << e.what() << std::endl;
-        throw;
-    }
-}
-
-void InsightFaceOnnxInfer::init_model()
-{
-    size_t num_inputs = m_session.GetInputCount();
-    size_t num_outputs = m_session.GetOutputCount();
-
-    // 读取模型输入名和输入尺寸
-    for (size_t i = 0; i < num_inputs; ++i)
-    {
-        // GetInputNameAllocated 返回一个托管指针（Ort::AllocatedStringPtr），
-        // 该指针持有 ONNX Runtime 分配的输入名称内存
-        // 使用 AllocatorWithDefaultOptions() 让 ONNX Runtime 自动管理内存的分配和释放
-        auto name_ptr = m_session.GetInputNameAllocated(i, Ort::AllocatorWithDefaultOptions());
-
-        // 将输入名称的原始指针存储到 m_input_names 向量中
-        // 这用于 session_.Run() 时作为输入绑定名称的数组
-        m_input_names.push_back(name_ptr.get());
-
-        // 将托管指针本身移动到 m_input_names_ptr 向量中
-        // 这确保在本对象销毁前，内存不被提前释放
-        // 使用 std::move() 转移所有权，避免额外的拷贝开销
-        m_input_names_ptr.push_back(std::move(name_ptr));
-    }
-
-    // 读取模型输出名，用于推理时绑定输出
-    // 类似输入名称的处理，分别存储原始指针和托管指针
-    for (size_t i = 0; i < num_outputs; ++i)
-    {
-        auto name_ptr = m_session.GetOutputNameAllocated(i, Ort::AllocatorWithDefaultOptions());
-        // 用于 session_.Run() 的输出绑定
-        m_output_names.push_back(name_ptr.get());
-        // 保持内存生命周期
-        m_output_names_pt_.push_back(std::move(name_ptr));
-    }
-}
-
-
-std::vector<Detection> InsightFaceOnnxInfer::detect(cv::Mat &img)
+std::vector<FaceDetectInfo> InsightFaceOnnxDetector::detect(const cv::Mat &img)
 {
     if (img.empty())
     {
         std::cerr << "[ERROR] Empty input image" << std::endl;
         return {};
     }
-    
+
     float scale;
     // 第一步： 前处理
     auto input_tensor = preprocess(img, scale);
@@ -125,9 +50,9 @@ std::vector<Detection> InsightFaceOnnxInfer::detect(cv::Mat &img)
     // session_.Run() 接收输入名、输入张量、输出名
     // 并返回 ONNX Runtime 分配的输出张量向量
     std::vector<Ort::Value> outputs = m_session.Run(
-        Ort::RunOptions{},    // 运行选项（使用默认设置）
+        Ort::RunOptions{},     // 运行选项（使用默认设置）
         m_input_names.data(),  // 输入名称数组
-        &input_mem,           // 输入张量数组
+        &input_mem,            // 输入张量数组
         m_input_names.size(),  // 输入数量
         m_output_names.data(), // 输出名称数组
         m_output_names.size()  // 输出数量
@@ -135,11 +60,11 @@ std::vector<Detection> InsightFaceOnnxInfer::detect(cv::Mat &img)
 
     // 第四步：后处理模型输出，生成最终的检测结果
     auto res = postprocess(outputs, scale, img.size()); // 后处理
-    
+
     return res;
 }
 
-std::vector<uint8_t> InsightFaceOnnxInfer::preprocess(const cv::Mat &img, float &scale)
+std::vector<uint8_t> InsightFaceOnnxDetector::preprocess(const cv::Mat &img, float &scale)
 {
     int img_h = img.rows;
     int img_w = img.cols;
@@ -184,9 +109,8 @@ std::vector<uint8_t> InsightFaceOnnxInfer::preprocess(const cv::Mat &img, float 
     return input_tensor;
 }
 
-
-std::vector<Detection> InsightFaceOnnxInfer::postprocess(std::vector<Ort::Value> &outputs, float scale, 
-                                          const cv::Size &original_size)
+std::vector<FaceDetectInfo> InsightFaceOnnxDetector::postprocess(std::vector<Ort::Value> &outputs, float scale,
+                                                                 const cv::Size &original_size)
 {
     std::vector<float> all_scores;
     std::vector<float> all_bboxes;
@@ -202,16 +126,14 @@ std::vector<Detection> InsightFaceOnnxInfer::postprocess(std::vector<Ort::Value>
     std::cout << "all_bboxes.size() = " << all_bboxes.size() << std::endl;
 
     return performNMS(all_scores, all_bboxes, all_landmarks, m_nms_threshold);
-    
 }
-
 
 // 从特征金字塔的单个层提取检测框、得分和关键点
 // 该方法处理模型输出的一个特征层，提取该层中得分高于阈值的所有检测框
-void InsightFaceOnnxInfer::processFeatureLayer(std::vector<Ort::Value> &outputs, size_t layer_idx,
-                                float scale, float threshold, const cv::Size &input_size, const cv::Size &original_size,
-                                std::vector<float> &all_scores, std::vector<float> &all_bboxes,
-                                std::vector<float> &all_landmarks)
+void InsightFaceOnnxDetector::processFeatureLayer(std::vector<Ort::Value> &outputs, size_t layer_idx,
+                                                  float scale, float threshold, const cv::Size &input_size, const cv::Size &original_size,
+                                                  std::vector<float> &all_scores, std::vector<float> &all_bboxes,
+                                                  std::vector<float> &all_landmarks)
 {
     int stride = m_feat_strides[layer_idx]; // 该层相对于原图的下采样步长
     // 从 ONNX Runtime 输出张量中获取该层的检测得分
@@ -251,8 +173,8 @@ void InsightFaceOnnxInfer::processFeatureLayer(std::vector<Ort::Value> &outputs,
         // 需要反向应用所有预处理变换：缩放、填充等
         // 根据锚框中心坐标和边界值计算边界框的四个角
         // (cx - l, cy - t) 是左上角，(cx + r, cy + b) 是右下角
-        float x1 = (cx - l ) / scale; // 左上角 X：先减去填充，再缩放回原图
-        float y1 = (cy - t ) / scale; // 左上角 Y
+        float x1 = (cx - l) / scale; // 左上角 X：先减去填充，再缩放回原图
+        float y1 = (cy - t) / scale; // 左上角 Y
         float x2 = (cx + r) / scale; // 右下角 X
         float y2 = (cy + b) / scale; // 右下角 Y
 
@@ -289,10 +211,9 @@ void InsightFaceOnnxInfer::processFeatureLayer(std::vector<Ort::Value> &outputs,
 
 // 对所有候选框执行非极大值抑制（NMS）
 // 该方法根据 IoU 阈值过滤掉重叠过多的低分框，返回最终的检测结果
-std::vector<Detection> InsightFaceOnnxInfer::performNMS(const std::vector<float> &all_scores, const std::vector<float> &all_bboxes,
-                                         const std::vector<float> &all_landmarks, float nms_threshold)
+std::vector<FaceDetectInfo> InsightFaceOnnxDetector::performNMS(const std::vector<float> &all_scores, const std::vector<float> &all_bboxes, const std::vector<float> &all_landmarks, float nms_threshold)
 {
-    std::vector<Detection> results;
+    std::vector<FaceDetectInfo> results;
 
     // 非极大值抑制（NMS）的准备工作：创建索引数组并按得分降序排序
     // 这样可以先处理高置信度的检测框，避免重复检测
@@ -313,22 +234,23 @@ std::vector<Detection> InsightFaceOnnxInfer::performNMS(const std::vector<float>
         if (suppressed[idx])
             continue;
 
+        FaceDetectInfo face;
         // 构建检测结果结构体，存储该边界框及其属性
-        Detection det;
-        det.x1 = all_bboxes[idx * 4];     // 左上角 X
-        det.y1 = all_bboxes[idx * 4 + 1]; // 左上角 Y
-        det.x2 = all_bboxes[idx * 4 + 2]; // 右下角 X
-        det.y2 = all_bboxes[idx * 4 + 3]; // 右下角 Y
-        det.score = all_scores[idx];      // 检测得分
+        float x1 = all_bboxes[idx * 4];
+        float y1 = all_bboxes[idx * 4 + 1];
+        float x2 = all_bboxes[idx * 4 + 2];
+        float y2 = all_bboxes[idx * 4 + 3];
+        face.bbox = cv::Rect(x1, y1, x2 - x1, y2 - y1);
+        face.det_score = all_scores[idx];
 
         // 如果有关键点信息，则将其存储到检测结果中
         if (m_use_kps)
         {
-            det.landmarks.resize(5); // 分配 5 个关键点的空间
+            face.landmarks.resize(5); // 分配 5 个关键点的空间
             for (int k = 0; k < 5; ++k)
             {
                 // 每个关键点存储为 cv::Point2f (x, y)
-                det.landmarks[k] = cv::Point2f(
+                face.landmarks[k] = cv::Point2f(
                     all_landmarks[idx * 10 + 2 * k],    // 关键点 X 坐标
                     all_landmarks[idx * 10 + 2 * k + 1] // 关键点 Y 坐标
                 );
@@ -336,7 +258,7 @@ std::vector<Detection> InsightFaceOnnxInfer::performNMS(const std::vector<float>
         }
 
         // 将通过 NMS 的检测框添加到最终结果
-        results.push_back(det);
+        results.push_back(face);
 
         // 非极大值抑制（NMS）: 与当前框对比，抑制重叠过多的低分框
         // 只需对比后续未处理的框，因为前面的已经被处理过了
@@ -347,10 +269,10 @@ std::vector<Detection> InsightFaceOnnxInfer::performNMS(const std::vector<float>
                 continue; // 如果已被抑制，跳过
 
             // 计算两个边界框的交集（Intersection）
-            float xx1 = std::max(det.x1, all_bboxes[idx2 * 4]);     // 交集左上角 X
-            float yy1 = std::max(det.y1, all_bboxes[idx2 * 4 + 1]); // 交集左上角 Y
-            float xx2 = std::min(det.x2, all_bboxes[idx2 * 4 + 2]); // 交集右下角 X
-            float yy2 = std::min(det.y2, all_bboxes[idx2 * 4 + 3]); // 交集右下角 Y
+            float xx1 = std::max((float)face.bbox.x, all_bboxes[idx2 * 4]);                          // 交集左上角 X
+            float yy1 = std::max((float)face.bbox.y, all_bboxes[idx2 * 4 + 1]);                      // 交集左上角 Y
+            float xx2 = std::min((float)(face.bbox.x + face.bbox.width), all_bboxes[idx2 * 4 + 2]);  // 交集右下角 X
+            float yy2 = std::min((float)(face.bbox.y + face.bbox.height), all_bboxes[idx2 * 4 + 3]); // 交集右下角 Y
 
             // 计算交集的面积（如果两个框不相交则为 0）
             float w = std::max(0.0f, xx2 - xx1); // 交集宽度
@@ -358,7 +280,7 @@ std::vector<Detection> InsightFaceOnnxInfer::performNMS(const std::vector<float>
             float inter = w * h;                 // 交集面积
 
             // 计算两个框的并集面积，用于计算 IoU（Intersection over Union）
-            float area1 = (det.x2 - det.x1) * (det.y2 - det.y1); // 框 1 的面积
+            float area1 = face.bbox.width * face.bbox.height; // 框 1 的面积
             float area2 = (all_bboxes[idx2 * 4 + 2] - all_bboxes[idx2 * 4]) *
                           (all_bboxes[idx2 * 4 + 3] - all_bboxes[idx2 * 4 + 1]); // 框 2 的面积
             float ovr = inter / (area1 + area2 - inter);                         // IoU = 交集 / 并集
