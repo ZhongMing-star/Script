@@ -40,8 +40,10 @@ std::vector<FaceDetectInfo> InsightFaceOnnxDetector::detect(const cv::Mat &img)
     // 注意：这里不拷贝数据，而是直接使用内存指针（需要确保数据有效期内调用 Run）
     auto input_mem = Ort::Value::CreateTensor<uint8_t>(
         memory_info,
-        input_tensor.data(), // 浮点数据指针
-        input_tensor.size(), // 数据元素数量
+        // input_tensor.data(), // 浮点数据指针
+        img.data,
+        img.total() * img.channels(),
+        // input_tensor.size(), // 数据元素数量
         input_dims.data(),   // 张量维度数组
         input_dims.size()    // 维度数
     );
@@ -91,22 +93,23 @@ std::vector<uint8_t> InsightFaceOnnxDetector::preprocess(const cv::Mat &img, flo
 
     // 计算输入张量所需的总元素数：H × W × 3
     // 此处耗时严重且占用 CPU 待优化
-    size_t input_size = static_cast<size_t>(img_h) * img_w * 3;
-    std::cout << "input_size = " << input_size << std::endl;
-    std::vector<uint8_t> input_tensor(input_size);
-    int idx = 0;
-    for (int h = 0; h < img_h; ++h)
-    {
-        const cv::Vec3b *row = img.ptr<cv::Vec3b>(h);
-        for (int w = 0; w < img_w; ++w)
-        {
-            for (int c = 0; c < 3; ++c)
-            {
-                input_tensor[idx++] = row[w][c];
-            }
-        }
-    }
-    return input_tensor;
+    // size_t input_size = static_cast<size_t>(img_h) * img_w * 3;
+    // std::cout << "input_size = " << input_size << std::endl;
+    // std::vector<uint8_t> input_tensor(input_size);
+    // int idx = 0;
+    // for (int h = 0; h < img_h; ++h)
+    // {
+    //     const cv::Vec3b *row = img.ptr<cv::Vec3b>(h);
+    //     for (int w = 0; w < img_w; ++w)
+    //     {
+    //         for (int c = 0; c < 3; ++c)
+    //         {
+    //             input_tensor[idx++] = row[w][c];
+    //         }
+    //     }
+    // }
+    // return input_tensor;
+    return {};
 }
 
 std::vector<FaceDetectInfo> InsightFaceOnnxDetector::postprocess(std::vector<Ort::Value> &outputs, float scale,

@@ -1,95 +1,39 @@
-cmake_minimum_required(VERSION 3.10)
-project(face_detection_cpp)
+cmake_minimum_required(VERSION 3.16)
+project(face_106det)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
-
-set(CMAKE_INSTALL_RPATH "$ORIGIN")
-set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
-
-# --------------------------
-# ROS 2 依赖
-# --------------------------
-find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(cv_bridge REQUIRED)
+# 找到 OpenCV
 find_package(OpenCV REQUIRED)
-find_package(CURL REQUIRED)
-find_package(Eigen3 REQUIRED)
-find_package(nlohmann_json REQUIRED)
 
-# --------------------------
-# ONNX Runtime 配置（绝对路径，不使用 -l 方式）
-# --------------------------
-set(ORT_INCLUDE_DIR "/usr/local/include")
-set(ORT_LIBRARY "/usr/local/lib/libonnxruntime.so")
+# 找到 ONNX Runtime（需提前安装）
+set(ONNXRUNTIME_ROOT "/mnt/d/Data/code/Script/project/cpp-std-project/InspireFace_onnx_infer/thirdparty/onnxruntime-linux-x64-gpu-1.20.1") # 改为你的路径
+# set(ONNXRUNTIME_ROOT "${CMAKE_SOURCE_DIR}/thirdparty/onnxruntime-linux-x64-1.20.1") # 改为你的路径
+include_directories(${ONNXRUNTIME_ROOT}/include)
+link_directories(${ONNXRUNTIME_ROOT}/lib)
 
-# --------------------------
-# 头文件路径（全部写在前面）
-# --------------------------
-include_directories(
-  ${CMAKE_SOURCE_DIR}/include
-  ${ORT_INCLUDE_DIR}
-  ${CURL_INCLUDE_DIRS}
-  ${OpenCV_INCLUDE_DIRS}
+# 库文件
+add_library(insight_face_onnx_infer_lib
+    include/base_onnx_infer.cpp
+    include/insight_face_onnx_detector.cpp
+    include/insight_face_onnx_feature_extract.cpp
+    include/fall_onnx_detectior.cpp
+)
+target_include_directories(insight_face_onnx_infer_lib PUBLIC include)
+target_link_libraries(insight_face_onnx_infer_lib
+    ${OpenCV_LIBS}
+    onnxruntime
 )
 
-# --------------------------
-# 生成可执行文件
-# --------------------------
-add_executable(face_detection_cpp
-  src/main.cpp
-  include/insight_face_onnx_feature_extract.cpp
-  include/insight_face_onnx_detector.cpp
-  include/base_onnx_infer.cpp
-)
+# SCRFD 测试程序
+add_executable(main src/main.cpp)
+target_link_libraries(main insight_face_onnx_infer_lib)
 
-# --------------------------
-# ROS 2 依赖链接
-# --------------------------
-ament_target_dependencies(face_detection_cpp
-  rclcpp
-  sensor_msgs
-  std_msgs
-  cv_bridge
-  OpenCV
-  nlohmann_json
-)
+# SCRFD 测试程序
+add_executable(test_insight_face_onnx_feature_extract src/test_insight_face_onnx_feature_extract.cpp)
+target_link_libraries(test_insight_face_onnx_feature_extract insight_face_onnx_infer_lib)
 
-# --------------------------
-# 第三方库链接（关键：直接写绝对路径）
-# --------------------------
-target_link_libraries(face_detection_cpp
-  Eigen3::Eigen
-  ${CURL_LIBRARIES}
-  ${ORT_LIBRARY}  # 这里只写 /usr/local/lib/libonnxruntime.so，不写任何 -lonnxruntime
-)
-
-# --------------------------
-# 安装规则
-# --------------------------
-install(TARGETS
-  face_detection_cpp
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-install(DIRECTORY resources/
-  DESTINATION share/${PROJECT_NAME}/resources
-)
-
-install(DIRECTORY config/
-  DESTINATION share/${PROJECT_NAME}/config
-)
-
-install(DIRECTORY launch/
-  DESTINATION share/${PROJECT_NAME}/launch
-)
-
-ament_package()
+# SCRFD 测试程序
+add_executable(test_fall_onnx_detectior test/test_fall_onnx_detectior.cpp)
+target_link_libraries(test_fall_onnx_detectior insight_face_onnx_infer_lib)

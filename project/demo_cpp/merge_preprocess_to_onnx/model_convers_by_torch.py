@@ -37,16 +37,12 @@ class PreprocessModule(nn.Module):
         x = F.resize(x, [new_h, new_w], interpolation=F.InterpolationMode.BILINEAR)
         
         # 4. 填充到目标尺寸（黑边）
-        pad_top = (self.target_size - new_h) // 2
-        pad_bottom = self.target_size - new_h - pad_top
-        pad_left = (self.target_size - new_w) // 2
-        pad_right = self.target_size - new_w - pad_left
-        x = F.pad(x, [pad_left, pad_right, pad_top, pad_bottom], fill=0.0)
+        pad_bottom = self.target_size - new_h
+        pad_right = self.target_size - new_w
+        x = F.pad(x, [0, pad_right, 0, pad_bottom], fill=0.0)
         
         # 5. 归一化 (x/255 - mean) / std
         x = x / 255.0
-        x = (x - self.mean.to(x.device)) / self.std.to(x.device)
-        
         return x
 
 
@@ -81,7 +77,7 @@ def export_onnx_with_preprocess(
     original_onnx = onnx.load(input_onnx_path)
 
     # 尝试将原始模型转换为一个较新的 opset（18），以便与 PyTorch 导出的子图兼容
-    desired_opset = 18
+    desired_opset = 13
     try:
         orig_opset = original_onnx.opset_import[0].version
     except Exception:

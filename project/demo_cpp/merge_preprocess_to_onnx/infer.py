@@ -9,7 +9,7 @@ def draw_bboxes(img, bboxes):
         cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
 def main():
-    det_model = SCRFD(model_file="/mnt/d/Data/code/Script/project/demo_cpp/merge_preprocess_to_onnx/model/det_500m_with_prep.onnx")
+    det_model = SCRFD(model_file="/mnt/d/Data/code/Script/project/demo_cpp/merge_preprocess_to_onnx/model/det_500m_torch.onnx")
     
     post_fix = 2
     img = cv2.imread("/mnt/d/Data/code/Script/project/demo_cpp/insightface_onnx_infer/resource/face.jpg")

@@ -3,26 +3,29 @@
 #include "insight_face_onnx_detector.h"
 #include <chrono>
 
-
-
-int main() {
-    std::string model_path = "/mnt/d/Data/code/Script/project/cpp-std-project/InspireFace_onnx_infer/resource/models/det_500m_with_pre.onnx";
+int main()
+{
+    std::string model_path = "/mnt/d/Data/code/Script/project/cpp-std-project/InspireFace_onnx_infer/resource/models/det_500m_with_pre_1280.onnx";
     std::string image_path = "/mnt/d/Data/code/Script/project/cpp-std-project/InspireFace_onnx_infer/resource/face3.jpg";
-    
-    InsightFaceOnnxDetector model(model_path, 0.5, 0.4, 1, false, 0);  // true 表示启用 GPU + TensorRT
+    InsightFaceOnnxDetector model(model_path, 0.5, 0.4, 1, true, 0); // true 表示启用 GPU + TensorRT
     cv::Mat img = cv::imread(image_path);
-    if (img.empty()) {
+    if (img.empty())
+    {
         std::cerr << "[ERROR] Failed to read image: " << image_path << std::endl;
         return -1;
     }
 
-    std::vector<FaceDetectInfo> results = model.detect(img);
-    for (const auto& face_info : results) {
+    std::vector<FaceDetectInfo> results;
+    for (int i = 0; i < 100; i++)
+    {
+        results = model.detect(img);
+    }
+
+    for (const auto &face_info : results)
+    {
         cv::rectangle(img, face_info.bbox, cv::Scalar(0, 255, 0), 2);
     }
 
-
-    cv::imwrite("./scrfd_result1.jpg", img);
+    cv::imwrite("./scrfd_result_1280.jpg", img);
     std::cout << "[INFO] Result saved to: ./scrfd_result1.jpg" << std::endl;
-
 }

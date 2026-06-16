@@ -234,3 +234,5 @@ onnxruntime-linux-x64-gpu-*.tgz
 # CMake
 CMakeUserPresets.json
 CMakePresets.json
+"project/demo_cpp/insightface_onnx_infer/thirdparty/*.tgz" 
+"project/demo_cpp/InspireFace_demo_cpp/source/models/*.trt" 

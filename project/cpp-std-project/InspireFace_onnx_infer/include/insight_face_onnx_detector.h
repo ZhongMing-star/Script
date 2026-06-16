@@ -45,7 +45,7 @@ private:
 
 
     // 模型的输入就是 640 * 640
-    const cv::Size m_input_size = cv::Size(640, 640);
+    const cv::Size m_input_size = cv::Size(1280, 1280);
     const int m_fmc = 3;
     const int m_num_anchors = 1;
     const bool m_use_kps = false;
