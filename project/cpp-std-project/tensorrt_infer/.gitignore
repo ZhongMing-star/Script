@@ -1,0 +1,66 @@
+# -----------------------------
+# Build / CMake intermediate files
+# -----------------------------
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Compiler artifacts
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.lib
+*.exp
+*.pdb
+*.d
+
+# -----------------------------
+# Runtime logs / temp files
+# -----------------------------
+*.log
+*.tmp
+*.temp
+*.cache
+*.bak
+*.swp
+
+# -----------------------------
+# Large model / engine artifacts
+# -----------------------------
+*.pt
+*.pth
+*.onnx
+*.engine
+*.trt
+*.plan
+*.bin
+*.weights
+*.npz
+
+# -----------------------------
+# Calibration files
+# -----------------------------
+*onnx*
+*.calib
+
+# Model/output directories
+outputs/
+sources/models/*
+sources/images/*
+resource/models/*
+
+# Keep directory placeholders if present
+!sources/models/.gitkeep
+!sources/images/.gitkeep
+!resource/models/.gitkeep
+!outputs/.gitkeep
