@@ -47,6 +47,9 @@ compile_commands.json
 *.weights
 *.npz
 
+*.jpg 
+*.png
+
 # -----------------------------
 # Calibration files
 # -----------------------------
