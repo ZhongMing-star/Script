@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -65,6 +66,7 @@ struct LetterBoxInfo {
 struct Arguments {
 	std::string enginePath = "resource/model/fall_detection.trt";
 	std::string imagePath;
+	std::string imgRootPath = "img_root";
 	std::string outputPath = "outputs/result.jpg";
 	std::string labelsPath = "config/labels.txt";
 	float confThreshold = 0.25f;
@@ -108,14 +110,17 @@ static std::vector<std::string> loadLabels(const std::string& labelPath, int cla
 }
 
 static LetterBoxInfo letterbox(const cv::Mat& image, cv::Mat& output, int targetSize) {
+	std::cout << "原始图片尺寸: " << image.cols << "x" << image.rows << std::endl;
+	std::cout << "目标尺寸: " << targetSize << "x" << targetSize << std::endl;
+
 	const float scale = std::min(static_cast<float>(targetSize) / static_cast<float>(image.cols),
 								 static_cast<float>(targetSize) / static_cast<float>(image.rows));
 	const int resizedWidth = static_cast<int>(std::round(image.cols * scale));
 	const int resizedHeight = static_cast<int>(std::round(image.rows * scale));
 	const int padW = targetSize - resizedWidth;
 	const int padH = targetSize - resizedHeight;
-	const int padLeft = padW / 2;
-	const int padTop = padH / 2;
+	const int padLeft = 0;
+	const int padTop = 0;
 	const int padRight = padW - padLeft;
 	const int padBottom = padH - padTop;
 
@@ -127,7 +132,7 @@ static LetterBoxInfo letterbox(const cv::Mat& image, cv::Mat& output, int target
 
 static void printUsage(const char* program) {
 	std::cout << "用法: " << program
-			  << " --image <image_path> [--engine <engine_path>] [--output <output_path>]"
+			  << " [--img_root <image_root>] [--image <image_path>] [--engine <engine_path>] [--output <output_path>]"
 			  << " [--labels <labels_path>] [--conf 0.25] [--iou 0.45]" << std::endl;
 }
 
@@ -146,6 +151,8 @@ static Arguments parseArguments(int argc, char** argv) {
 			args.enginePath = requireValue(key);
 		} else if (key == "--image") {
 			args.imagePath = requireValue(key);
+		} else if (key == "--img_root") {
+			args.imgRootPath = requireValue(key);
 		} else if (key == "--output") {
 			args.outputPath = requireValue(key);
 		} else if (key == "--labels") {
@@ -162,6 +169,37 @@ static Arguments parseArguments(int argc, char** argv) {
 		}
 	}
 	return args;
+}
+
+static bool isImageFile(const fs::path& path) {
+	if (!path.has_extension()) {
+		return false;
+	}
+	std::string ext = path.extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+		return static_cast<char>(std::tolower(ch));
+	});
+	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" || ext == ".tif" || ext == ".tiff" || ext == ".webp";
+}
+
+static std::vector<fs::path> collectImages(const fs::path& root) {
+	std::vector<fs::path> images;
+	if (!fs::exists(root)) {
+		return images;
+	}
+	if (fs::is_regular_file(root)) {
+		if (isImageFile(root)) {
+			images.push_back(root);
+		}
+		return images;
+	}
+	for (const auto& entry : fs::recursive_directory_iterator(root)) {
+		if (entry.is_regular_file() && isImageFile(entry.path())) {
+			images.push_back(entry.path());
+		}
+	}
+	std::sort(images.begin(), images.end());
+	return images;
 }
 
 class YoloTrtDetector {
@@ -230,7 +268,8 @@ public:
 
 		inputDims_ = engine_->getTensorShape(inputName_.c_str());
 		outputDims_ = engine_->getTensorShape(outputName_.c_str());
-		if (inputDims_.nbDims != 4 || outputDims_.nbDims != 3) {
+		inputType_ = engine_->getTensorDataType(inputName_.c_str());
+		if (inputDims_.nbDims != 3 || outputDims_.nbDims != 3) {
 			std::cerr << "不支持的输入/输出维度" << std::endl;
 			return false;
 		}
@@ -248,7 +287,8 @@ public:
 
 		inputCount_ = volume(inputDims_);
 		outputCount_ = volume(outputDims_);
-		hostInput_.assign(inputCount_, 0.0f);
+		inputBytes_ = inputCount_ * elementSize(inputType_);
+		hostInput_.assign(inputBytes_, 0);
 		hostOutput_.assign(outputCount_, 0.0f);
 
 		void* inputDevice = nullptr;
@@ -257,7 +297,7 @@ public:
 			std::cerr << "创建 CUDA stream 失败" << std::endl;
 			return false;
 		}
-		if (cudaMalloc(&inputDevice, inputCount_ * sizeof(float)) != cudaSuccess) {
+		if (cudaMalloc(&inputDevice, inputBytes_) != cudaSuccess) {
 			std::cerr << "分配输入显存失败" << std::endl;
 			return false;
 		}
@@ -268,31 +308,57 @@ public:
 
 		inputDevice_.reset(inputDevice);
 		outputDevice_.reset(outputDevice);
+
+		std::cout << "输入 Tensor: " << inputName_ << " shape=[" << inputDims_.d[0] << ", " << inputDims_.d[1] << ", " << inputDims_.d[2]
+				  << "] type=" << static_cast<int>(inputType_) << " bytes=" << inputBytes_ << std::endl;
 		return true;
 	}
 
 	std::vector<Detection> infer(const cv::Mat& image, float confThreshold, float iouThreshold) {
+		auto start = std::chrono::steady_clock::now();
 		const int imageWidth = image.cols;
 		const int imageHeight = image.rows;
+		const bool hwcInput = inputDims_.d[2] == 3;
+		const int targetH = hwcInput ? inputDims_.d[0] : inputDims_.d[1];
+		const int targetW = hwcInput ? inputDims_.d[1] : inputDims_.d[2];
 
 		cv::Mat padded;
-		const LetterBoxInfo letterBox = letterbox(image, padded, inputDims_.d[2]);
+		if (targetH != targetW) {
+			throw std::runtime_error("当前示例仅支持方形输入尺寸");
+		}
+		const LetterBoxInfo letterBox = letterbox(image, padded, targetH);
+		std::cout << "缩放比例: " << letterBox.scale << ", 左边距: " << letterBox.padLeft << ", 上边距: " << letterBox.padTop << std::endl;
 
-		cv::Mat rgb;
-		cv::cvtColor(padded, rgb, cv::COLOR_BGR2RGB);
-		rgb.convertTo(rgb, CV_32FC3, 1.0 / 255.0);
+		std::cout << "预处理后图片尺寸: " << padded.cols << "x" << padded.rows << std::endl;
 
-		std::vector<cv::Mat> channels(3);
-		cv::split(rgb, channels);
-		const size_t planeSize = static_cast<size_t>(inputDims_.d[2] * inputDims_.d[3]);
-		for (int c = 0; c < 3; ++c) {
-			std::memcpy(hostInput_.data() + c * planeSize, channels[c].data, planeSize * sizeof(float));
+		if (inputType_ == nvinfer1::DataType::kUINT8 && hwcInput) {
+			cv::Mat contiguous = padded.isContinuous() ? padded : padded.clone();
+			if (static_cast<size_t>(contiguous.total() * contiguous.elemSize()) != inputBytes_) {
+				throw std::runtime_error("输入尺寸与引擎期望不一致");
+			}
+			std::memcpy(hostInput_.data(), contiguous.data, inputBytes_);
+		} else if (inputType_ == nvinfer1::DataType::kFLOAT && !hwcInput) {
+			cv::Mat rgb;
+			cv::cvtColor(padded, rgb, cv::COLOR_BGR2RGB);
+			rgb.convertTo(rgb, CV_32FC3, 1.0 / 255.0);
+
+			std::vector<cv::Mat> channels(3);
+			cv::split(rgb, channels);
+			const size_t planeSize = static_cast<size_t>(targetH * targetW);
+			std::uint8_t* inputPtr = reinterpret_cast<std::uint8_t*>(hostInput_.data());
+			for (int c = 0; c < 3; ++c) {
+				std::memcpy(inputPtr + c * planeSize, channels[c].data, planeSize * sizeof(std::uint8_t));
+			}
+		} else {
+			throw std::runtime_error("暂不支持的输入类型或布局，请检查 ONNX 导出与 TensorRT 输入格式");
 		}
 
-		if (cudaMemcpyAsync(inputDevice_.get(), hostInput_.data(), inputCount_ * sizeof(float), cudaMemcpyHostToDevice, stream_) != cudaSuccess) {
+		auto e1 = std::chrono::steady_clock::now();
+		if (cudaMemcpyAsync(inputDevice_.get(), hostInput_.data(), inputBytes_, cudaMemcpyHostToDevice, stream_) != cudaSuccess) {
 			throw std::runtime_error("输入数据拷贝到 GPU 失败");
 		}
 
+		auto e2 = std::chrono::steady_clock::now();
 		if (!context_->setTensorAddress(inputName_.c_str(), inputDevice_.get())) {
 			throw std::runtime_error("设置输入 tensor 地址失败");
 		}
@@ -304,14 +370,24 @@ public:
 			throw std::runtime_error("TensorRT 推理执行失败");
 		}
 
+		auto e3 = std::chrono::steady_clock::now();
 		if (cudaMemcpyAsync(hostOutput_.data(), outputDevice_.get(), outputCount_ * sizeof(float), cudaMemcpyDeviceToHost, stream_) != cudaSuccess) {
 			throw std::runtime_error("输出数据拷贝回 CPU 失败");
 		}
 		if (cudaStreamSynchronize(stream_) != cudaSuccess) {
 			throw std::runtime_error("CUDA stream 同步失败");
 		}
-
-		return nms(decode(hostOutput_.data(), imageWidth, imageHeight, letterBox, confThreshold), iouThreshold);
+		auto e4 = std::chrono::steady_clock::now();
+		
+		auto res = nms(decode(hostOutput_.data(), imageWidth, imageHeight, letterBox, confThreshold), iouThreshold);
+		auto e5 = std::chrono::steady_clock::now();
+		std::cout << "推理总耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e5 - start).count() << " ms;"
+			<< "前处理耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e1 - start).count() << " ms;"
+			<< "CPU => GPU 耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e2 - e1).count() << " ms;"
+			<< "推理耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e3 - e2).count() << " ms;"
+			<< "GPU => CPU 耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e4 - e3).count() << " ms;"
+			<< "后处理耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e5 - e4).count() << " ms" << std::endl;
+		return res;
 	}
 
 	cv::Mat drawDetections(const cv::Mat& image, const std::vector<Detection>& detections, const std::vector<std::string>& labels) const {
@@ -340,6 +416,25 @@ public:
 	}
 
 private:
+	size_t elementSize(nvinfer1::DataType type) const {
+		switch (type) {
+		case nvinfer1::DataType::kFLOAT:
+			return sizeof(float);
+		case nvinfer1::DataType::kHALF:
+			return sizeof(std::uint16_t);
+		case nvinfer1::DataType::kINT8:
+			return sizeof(std::int8_t);
+		case nvinfer1::DataType::kINT32:
+			return sizeof(std::int32_t);
+		case nvinfer1::DataType::kUINT8:
+			return sizeof(std::uint8_t);
+		case nvinfer1::DataType::kBOOL:
+			return sizeof(bool);
+		default:
+			throw std::runtime_error("未知 TensorRT DataType");
+		}
+	}
+
 	size_t volume(const nvinfer1::Dims& dims) const {
 		size_t total = 1;
 		for (int i = 0; i < dims.nbDims; ++i) {
@@ -493,12 +588,14 @@ private:
 	std::unique_ptr<void, CudaDeleter> outputDevice_{nullptr};
 	nvinfer1::Dims inputDims_{};
 	nvinfer1::Dims outputDims_{};
+	nvinfer1::DataType inputType_{nvinfer1::DataType::kFLOAT};
 	std::string inputName_;
 	std::string outputName_;
 	size_t inputCount_ = 0;
+	size_t inputBytes_ = 0;
 	size_t outputCount_ = 0;
 	cudaStream_t stream_ = nullptr;
-	std::vector<float> hostInput_;
+	std::vector<std::uint8_t> hostInput_;
 	std::vector<float> hostOutput_;
 };
 
@@ -506,7 +603,7 @@ private:
 
 int main(int argc, char** argv) {
 	const Arguments args = parseArguments(argc, argv);
-	if (args.imagePath.empty()) {
+	if (args.imagePath.empty() && args.imgRootPath.empty()) {
 		printUsage(argv[0]);
 		return 1;
 	}
@@ -514,33 +611,44 @@ int main(int argc, char** argv) {
 	if (!detector.loadEngine(args.enginePath)) {
 		return 1;
 	}
-	for(int i =0 ; i< 100; i++){
+	const fs::path imgRoot = !args.imgRootPath.empty() ? fs::path(args.imgRootPath) : fs::path(args.imagePath);
+	const std::vector<fs::path> imagePaths = collectImages(imgRoot);
+	if (imagePaths.empty()) {
+		std::cerr << "未找到可推理的图像: " << imgRoot << std::endl;
+		return 1;
+	}
+
+	const std::vector<std::string> labels = loadLabels(args.labelsPath, std::max(1, detector.classCount()));
+	for (const auto& imagePath : imagePaths) {
 		try {
-
-			cv::Mat image = cv::imread(args.imagePath, cv::IMREAD_COLOR);
+			cv::Mat image = cv::imread(imagePath.string(), cv::IMREAD_COLOR);
 			if (image.empty()) {
-				std::cerr << "无法读取图片: " << args.imagePath << std::endl;
-				return 1;
+				std::cerr << "无法读取图片: " << imagePath << std::endl;
+				continue;
 			}
-
 
 			const auto start = std::chrono::steady_clock::now();
 			const std::vector<Detection> detections = detector.infer(image, args.confThreshold, args.iouThreshold);
 			const auto end = std::chrono::steady_clock::now();
 
-			const std::vector<std::string> labels = loadLabels(args.labelsPath, std::max(1, detector.classCount()));
 			cv::Mat rendered = detector.drawDetections(image, detections, labels);
 
-			const fs::path outputPath(args.outputPath);
-			if (!outputPath.parent_path().empty()) {
-				fs::create_directories(outputPath.parent_path());
+			fs::path outputPath(args.outputPath);
+			if (outputPath.has_extension()) {
+				outputPath = outputPath.parent_path();
 			}
-			if (!cv::imwrite(args.outputPath, rendered)) {
-				std::cerr << "保存结果图片失败: " << args.outputPath << std::endl;
-				return 1;
+			if (outputPath.empty()) {
+				outputPath = "outputs";
+			}
+			fs::create_directories(outputPath);
+			const fs::path outputFile = outputPath / (imagePath.stem().string() + "_result.jpg");
+			if (!cv::imwrite(outputFile.string(), rendered)) {
+				std::cerr << "保存结果图片失败: " << outputFile << std::endl;
+				continue;
 			}
 
 			std::chrono::duration<double, std::milli> elapsed = end - start;
+			std::cout << "图片: " << imagePath << std::endl;
 			std::cout << "推理完成, 耗时: " << elapsed.count() << " ms" << std::endl;
 			std::cout << "检测结果数量: " << detections.size() << std::endl;
 			for (size_t i = 0; i < detections.size(); ++i) {
@@ -549,10 +657,9 @@ int main(int argc, char** argv) {
 				std::cout << i << ": " << label << " score=" << det.score
 						<< " box=[" << det.box.x << ", " << det.box.y << ", " << det.box.width << ", " << det.box.height << "]" << std::endl;
 			}
-			std::cout << "结果已保存到: " << args.outputPath << std::endl;
+			std::cout << "结果已保存到: " << outputFile << std::endl;
 		} catch (const std::exception& e) {
-			std::cerr << "执行失败: " << e.what() << std::endl;
-			return 1;
+			std::cerr << "执行失败: " << imagePath << " : " << e.what() << std::endl;
 		}
 	}
 }

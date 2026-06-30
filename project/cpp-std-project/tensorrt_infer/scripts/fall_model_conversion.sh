@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-MODEL_PATH="${MODEL_PATH:-${ROOT_DIR}/resource/models/fall_detection.pt}"
+MODEL_PATH="${MODEL_PATH:-${ROOT_DIR}/resource/models/det_500m.onnx}"
 MODEL_BASENAME="$(basename "${MODEL_PATH}")"
 MODEL_STEM="${MODEL_BASENAME%.*}"
 
@@ -14,13 +14,13 @@ CALIB_DIR="${CALIB_DIR:-${ROOT_DIR}/resource/images}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TRTEXEC_BIN="${TRTEXEC_BIN:-}"
-MAX_IMAGES="${MAX_IMAGES:-64}"
+MAX_IMAGES="${MAX_IMAGES:-0}"
 WORKSPACE_GB="${WORKSPACE_GB:-4}"
 SIZES="${SIZES:-640 1280}"
 CLEAN_INTERMEDIATE="${CLEAN_INTERMEDIATE:-1}"
 
-EXPORT_SCRIPT="${ROOT_DIR}/scripts/model_conversion/01_export_end2end_yolo_onnx.py"
-CALIB_SCRIPT="${ROOT_DIR}/scripts/model_conversion/02_build_int8_engine_with_calibrator.py"
+EXPORT_SCRIPT="${ROOT_DIR}/scripts/InspireFace_model_conversion/01_export_end2end_InspireFace_onnx.py"
+CALIB_SCRIPT="${ROOT_DIR}/scripts/InspireFace_model_conversion/02_build_int8_engine_with_calibrator.py"
 
 if [[ -z "${TRTEXEC_BIN}" ]]; then
   if [[ -x "/usr/local/TensorRT-10.14.1.48/bin/trtexec" ]]; then
@@ -31,7 +31,7 @@ if [[ -z "${TRTEXEC_BIN}" ]]; then
 fi
 
 if [[ ! -f "${MODEL_PATH}" ]]; then
-  echo "PT model not found: ${MODEL_PATH}"
+  echo "ONNX model not found: ${MODEL_PATH}"
   exit 1
 fi
 
@@ -67,25 +67,24 @@ for SIZE in ${SIZES}; do
 
   FP16_ENGINE="${ENGINE_DIR}/${MODEL_STEM}_end2end_fp16_${SIZE}.trt"
   INT8_ENGINE="${ENGINE_DIR}/${MODEL_STEM}_end2end_int8_${SIZE}.trt"
-  INT8_ENGINE_CALIB_TMP="${ENGINE_DIR}/${MODEL_STEM}_end2end_int8_calib_tmp_${SIZE}.trt"
   CALIB_CACHE="${ENGINE_DIR}/${MODEL_STEM}_end2end_int8_${SIZE}.calib"
 
   echo "========== [${SIZE}x${SIZE}] =========="
 
   if [[ -f "${ONNX_PATH}" ]]; then
-    echo "[1/4] ONNX already exists, skip: ${ONNX_PATH}"
+    echo "[1/3] ONNX already exists, skip: ${ONNX_PATH}"
   else
-    echo "[1/4] Exporting static ONNX..."
+    echo "[1/3] Exporting static ONNX..."
     "${PYTHON_BIN}" "${EXPORT_SCRIPT}" \
-      --model_path "${MODEL_PATH}" \
+      --onnx "${MODEL_PATH}" \
       --input_size "${SIZE}" "${SIZE}" \
-      --onnx_file_path "${ONNX_PATH}"
+      --save_onnx "${ONNX_PATH}"
   fi
 
   if [[ -f "${FP16_ENGINE}" ]]; then
-    echo "[2/4] FP16 engine already exists, skip: ${FP16_ENGINE}"
+    echo "[2/3] FP16 engine already exists, skip: ${FP16_ENGINE}"
   else
-    echo "[2/4] Building FP16 engine..."
+    echo "[2/3] Building FP16 engine..."
     "${TRTEXEC_BIN}" \
       --onnx="${ONNX_PATH}" \
       --saveEngine="${FP16_ENGINE}" \
@@ -93,27 +92,16 @@ for SIZE in ${SIZES}; do
   fi
 
   if [[ -f "${CALIB_CACHE}" ]]; then
-    echo "[3/4] INT8 calibration cache already exists, skip: ${CALIB_CACHE}"
+    echo "[3/3] INT8 calibration cache already exists, skip: ${CALIB_CACHE}"
   else
-    echo "[3/4] Generating INT8 calibration cache..."
+    echo "[3/3] Generating INT8 calibration cache..."
     "${PYTHON_BIN}" "${CALIB_SCRIPT}" \
       --onnx "${ONNX_PATH}" \
-      --engine "${INT8_ENGINE_CALIB_TMP}" \
+      --engine "${INT8_ENGINE}" \
       --images "${CALIB_DIR}" \
       --cache "${CALIB_CACHE}" \
       --max-images "${MAX_IMAGES}" \
       --workspace-gb "${WORKSPACE_GB}"
-  fi
-
-  if [[ -f "${INT8_ENGINE}" ]]; then
-    echo "[4/4] INT8 engine already exists, skip: ${INT8_ENGINE}"
-  else
-    echo "[4/4] Building INT8 engine..."
-    "${TRTEXEC_BIN}" \
-      --onnx="${ONNX_PATH}" \
-      --saveEngine="${INT8_ENGINE}" \
-      --int8 --fp16 \
-      --calib="${CALIB_CACHE}"
   fi
 
   echo "[done] ONNX: ${ONNX_PATH}"

@@ -55,6 +55,7 @@ struct Detection {
 	cv::Rect2f box;
 	int classId = -1;
 	float score = 0.0f;
+	std::vector<cv::Point2f> landmarks;
 };
 
 struct LetterBoxInfo {
@@ -107,6 +108,19 @@ static std::vector<std::string> loadLabels(const std::string& labelPath, int cla
 		}
 	}
 	return labels;
+}
+
+static std::string dimsToString(const nvinfer1::Dims& dims) {
+	std::ostringstream oss;
+	oss << "[";
+	for (int i = 0; i < dims.nbDims; ++i) {
+		if (i > 0) {
+			oss << ", ";
+		}
+		oss << dims.d[i];
+	}
+	oss << "]";
+	return oss.str();
 }
 
 static LetterBoxInfo letterbox(const cv::Mat& image, cv::Mat& output, int targetSize) {
@@ -204,6 +218,16 @@ static std::vector<fs::path> collectImages(const fs::path& root) {
 
 class YoloTrtDetector {
 public:
+	struct OutputBinding {
+		std::string name;
+		nvinfer1::Dims dims{};
+		nvinfer1::DataType type{nvinfer1::DataType::kFLOAT};
+		size_t count = 0;
+		size_t bytes = 0;
+		std::unique_ptr<void, CudaDeleter> device{nullptr};
+		std::vector<float> hostFloat;
+	};
+
 	~YoloTrtDetector() {
 		if (stream_ != nullptr) {
 			cudaStreamDestroy(stream_);
@@ -252,47 +276,43 @@ public:
 		}
 
 		const int tensorCount = engine_->getNbIOTensors();
+		outputBindings_.clear();
 		for (int i = 0; i < tensorCount; ++i) {
 			const char* name = engine_->getIOTensorName(i);
 			if (engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT) {
 				inputName_ = name;
 			} else {
-				outputName_ = name;
+				OutputBinding binding;
+				binding.name = name;
+				outputBindings_.push_back(std::move(binding));
 			}
 		}
 
-		if (inputName_.empty() || outputName_.empty()) {
+		if (inputName_.empty() || outputBindings_.empty()) {
 			std::cerr << "未找到输入或输出 tensor" << std::endl;
 			return false;
 		}
 
 		inputDims_ = engine_->getTensorShape(inputName_.c_str());
-		outputDims_ = engine_->getTensorShape(outputName_.c_str());
 		inputType_ = engine_->getTensorDataType(inputName_.c_str());
-		if (inputDims_.nbDims != 3 || outputDims_.nbDims != 3) {
-			std::cerr << "不支持的输入/输出维度" << std::endl;
+		if (inputDims_.nbDims < 3 || inputDims_.nbDims > 4) {
+			std::cerr << "不支持的输入维度, input=" << dimsToString(inputDims_) << std::endl;
 			return false;
 		}
-
+		if (inputDims_.nbDims == 4 && inputDims_.d[0] != 1) {
+			std::cerr << "当前仅支持 batch=1 的输入, input=" << dimsToString(inputDims_) << std::endl;
+			return false;
+		}
 		if (!context_->setInputShape(inputName_.c_str(), inputDims_)) {
 			std::cerr << "设置输入维度失败" << std::endl;
 			return false;
 		}
 
-		outputDims_ = context_->getTensorShape(outputName_.c_str());
-		if (outputDims_.nbDims != 3) {
-			std::cerr << "获取输出维度失败" << std::endl;
-			return false;
-		}
-
 		inputCount_ = volume(inputDims_);
-		outputCount_ = volume(outputDims_);
 		inputBytes_ = inputCount_ * elementSize(inputType_);
 		hostInput_.assign(inputBytes_, 0);
-		hostOutput_.assign(outputCount_, 0.0f);
 
 		void* inputDevice = nullptr;
-		void* outputDevice = nullptr;
 		if (cudaStreamCreate(&stream_) != cudaSuccess) {
 			std::cerr << "创建 CUDA stream 失败" << std::endl;
 			return false;
@@ -301,26 +321,82 @@ public:
 			std::cerr << "分配输入显存失败" << std::endl;
 			return false;
 		}
-		if (cudaMalloc(&outputDevice, outputCount_ * sizeof(float)) != cudaSuccess) {
-			std::cerr << "分配输出显存失败" << std::endl;
+		inputDevice_.reset(inputDevice);
+
+		for (size_t i = 0; i < outputBindings_.size(); ++i) {
+			auto& binding = outputBindings_[i];
+			binding.dims = context_->getTensorShape(binding.name.c_str());
+			if (binding.dims.nbDims < 2 || binding.dims.nbDims > 4) {
+				std::cerr << "获取输出维度失败, name=" << binding.name
+						  << " dims=" << dimsToString(binding.dims) << std::endl;
+				return false;
+			}
+			if (binding.dims.nbDims == 4 && binding.dims.d[0] != 1) {
+				std::cerr << "当前仅支持 batch=1 的输出, name=" << binding.name
+						  << " dims=" << dimsToString(binding.dims) << std::endl;
+				return false;
+			}
+
+			binding.type = engine_->getTensorDataType(binding.name.c_str());
+			binding.count = volume(binding.dims);
+			binding.bytes = binding.count * elementSize(binding.type);
+			if (binding.type == nvinfer1::DataType::kFLOAT) {
+				binding.hostFloat.assign(binding.count, 0.0f);
+			}
+
+			void* outputDevice = nullptr;
+			if (cudaMalloc(&outputDevice, binding.bytes) != cudaSuccess) {
+				std::cerr << "分配输出显存失败: " << binding.name << std::endl;
+				return false;
+			}
+			binding.device.reset(outputDevice);
+
+			if (i == 0) {
+				outputName_ = binding.name;
+				outputDims_ = binding.dims;
+				outputCount_ = binding.count;
+			}
+		}
+
+		m_useKps_ = outputBindings_.size() >= 9;
+		const size_t expectedOutputs = static_cast<size_t>(m_fmc_ * (m_useKps_ ? 3 : 2));
+		if (outputBindings_.size() < expectedOutputs) {
+			std::cerr << "输出 tensor 数量不足, 需要至少 " << expectedOutputs
+					  << " 实际 " << outputBindings_.size() << std::endl;
 			return false;
 		}
 
-		inputDevice_.reset(inputDevice);
-		outputDevice_.reset(outputDevice);
-
-		std::cout << "输入 Tensor: " << inputName_ << " shape=[" << inputDims_.d[0] << ", " << inputDims_.d[1] << ", " << inputDims_.d[2]
-				  << "] type=" << static_cast<int>(inputType_) << " bytes=" << inputBytes_ << std::endl;
+		std::cout << "输入 Tensor: " << inputName_ << " shape=" << dimsToString(inputDims_)
+				  << " type=" << static_cast<int>(inputType_) << " bytes=" << inputBytes_ << std::endl;
+		std::cout << "输出 Tensor 数量: " << outputBindings_.size() << " (主输出: " << outputName_
+				  << " shape=" << dimsToString(outputDims_) << ")" << std::endl;
 		return true;
 	}
 
 	std::vector<Detection> infer(const cv::Mat& image, float confThreshold, float iouThreshold) {
 		auto start = std::chrono::steady_clock::now();
-		const int imageWidth = image.cols;
-		const int imageHeight = image.rows;
-		const bool hwcInput = inputDims_.d[2] == 3;
-		const int targetH = hwcInput ? inputDims_.d[0] : inputDims_.d[1];
-		const int targetW = hwcInput ? inputDims_.d[1] : inputDims_.d[2];
+		const bool hasBatchDim = inputDims_.nbDims == 4;
+		bool hwcInput = false;
+		int targetH = 0;
+		int targetW = 0;
+
+		if (hasBatchDim) {
+			if (inputDims_.d[3] == 3) {
+				hwcInput = true;   // [1, H, W, 3]
+				targetH = inputDims_.d[1];
+				targetW = inputDims_.d[2];
+			} else if (inputDims_.d[1] == 3) {
+				hwcInput = false;  // [1, 3, H, W]
+				targetH = inputDims_.d[2];
+				targetW = inputDims_.d[3];
+			} else {
+				throw std::runtime_error("不支持的 4D 输入布局: " + dimsToString(inputDims_));
+			}
+		} else {
+			hwcInput = (inputDims_.d[2] == 3); // [H, W, 3] or [3, H, W]
+			targetH = hwcInput ? inputDims_.d[0] : inputDims_.d[1];
+			targetW = hwcInput ? inputDims_.d[1] : inputDims_.d[2];
+		}
 
 		cv::Mat padded;
 		if (targetH != targetW) {
@@ -345,9 +421,9 @@ public:
 			std::vector<cv::Mat> channels(3);
 			cv::split(rgb, channels);
 			const size_t planeSize = static_cast<size_t>(targetH * targetW);
-			std::uint8_t* inputPtr = reinterpret_cast<std::uint8_t*>(hostInput_.data());
+			float* inputPtr = reinterpret_cast<float*>(hostInput_.data());
 			for (int c = 0; c < 3; ++c) {
-				std::memcpy(inputPtr + c * planeSize, channels[c].data, planeSize * sizeof(std::uint8_t));
+				std::memcpy(inputPtr + c * planeSize, channels[c].data, planeSize * sizeof(float));
 			}
 		} else {
 			throw std::runtime_error("暂不支持的输入类型或布局，请检查 ONNX 导出与 TensorRT 输入格式");
@@ -362,8 +438,10 @@ public:
 		if (!context_->setTensorAddress(inputName_.c_str(), inputDevice_.get())) {
 			throw std::runtime_error("设置输入 tensor 地址失败");
 		}
-		if (!context_->setTensorAddress(outputName_.c_str(), outputDevice_.get())) {
-			throw std::runtime_error("设置输出 tensor 地址失败");
+		for (const auto& binding : outputBindings_) {
+			if (!context_->setTensorAddress(binding.name.c_str(), binding.device.get())) {
+				throw std::runtime_error("设置输出 tensor 地址失败: " + binding.name);
+			}
 		}
 
 		if (!context_->enqueueV3(stream_)) {
@@ -371,15 +449,20 @@ public:
 		}
 
 		auto e3 = std::chrono::steady_clock::now();
-		if (cudaMemcpyAsync(hostOutput_.data(), outputDevice_.get(), outputCount_ * sizeof(float), cudaMemcpyDeviceToHost, stream_) != cudaSuccess) {
-			throw std::runtime_error("输出数据拷贝回 CPU 失败");
+		for (auto& binding : outputBindings_) {
+			if (binding.type != nvinfer1::DataType::kFLOAT || binding.hostFloat.empty()) {
+				continue;
+			}
+			if (cudaMemcpyAsync(binding.hostFloat.data(), binding.device.get(), binding.bytes, cudaMemcpyDeviceToHost, stream_) != cudaSuccess) {
+				throw std::runtime_error("输出数据拷贝回 CPU 失败: " + binding.name);
+			}
 		}
 		if (cudaStreamSynchronize(stream_) != cudaSuccess) {
 			throw std::runtime_error("CUDA stream 同步失败");
 		}
 		auto e4 = std::chrono::steady_clock::now();
 		
-		auto res = nms(decode(hostOutput_.data(), imageWidth, imageHeight, letterBox, confThreshold), iouThreshold);
+		auto res = postprocessInsight(letterBox.scale, targetH, targetW, image.size(), confThreshold, iouThreshold);
 		auto e5 = std::chrono::steady_clock::now();
 		std::cout << "推理总耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e5 - start).count() << " ms;"
 			<< "前处理耗时: " << std::chrono::duration_cast<std::chrono::milliseconds>(e1 - start).count() << " ms;"
@@ -395,6 +478,9 @@ public:
 		for (const auto& det : detections) {
 			const cv::Scalar color = colorForClass(det.classId);
 			cv::rectangle(canvas, det.box, color, 2);
+			for (const auto& lm : det.landmarks) {
+				cv::circle(canvas, lm, 2, cv::Scalar(0, 255, 255), -1, cv::LINE_AA);
+			}
 
 			const std::string label = (det.classId >= 0 && det.classId < static_cast<int>(labels.size())) ? labels[det.classId] : ("class_" + std::to_string(det.classId));
 			std::ostringstream oss;
@@ -412,7 +498,7 @@ public:
 	}
 
 	int classCount() const {
-		return featureCount() - 4;
+		return 1;
 	}
 
 private:
@@ -443,13 +529,6 @@ private:
 		return total;
 	}
 
-	int featureCount() const {
-		if (outputDims_.d[1] == 6 || outputDims_.d[1] == 84) {
-			return outputDims_.d[1];
-		}
-		return outputDims_.d[2];
-	}
-
 	cv::Scalar colorForClass(int classId) const {
 		static const std::vector<cv::Scalar> palette = {
 			{0, 215, 255},
@@ -463,85 +542,6 @@ private:
 			return {0, 255, 0};
 		}
 		return palette[static_cast<size_t>(classId) % palette.size()];
-	}
-
-	std::vector<Detection> decode(const float* output, int imageWidth, int imageHeight, const LetterBoxInfo& letterBox, float confThreshold) const {
-		const int featureCount = this->featureCount();
-		const int numClasses = featureCount - 4;
-		const int numPredictions = (outputDims_.d[1] == featureCount) ? outputDims_.d[2] : outputDims_.d[1];
-		const bool channelFirst = outputDims_.d[1] == featureCount;
-
-		std::vector<Detection> detections;
-		detections.reserve(static_cast<size_t>(numPredictions));
-
-		for (int i = 0; i < numPredictions; ++i) {
-			float cx = 0.0f;
-			float cy = 0.0f;
-			float w = 0.0f;
-			float h = 0.0f;
-			int classId = -1;
-			float score = 0.0f;
-
-			if (channelFirst) {
-				cx = output[0 * numPredictions + i];
-				cy = output[1 * numPredictions + i];
-				w = output[2 * numPredictions + i];
-				h = output[3 * numPredictions + i];
-				for (int c = 0; c < numClasses; ++c) {
-					float current = output[(4 + c) * numPredictions + i];
-					if (current > score) {
-						score = current;
-						classId = c;
-					}
-				}
-			} else {
-				const float* pred = output + static_cast<size_t>(i) * featureCount;
-				cx = pred[0];
-				cy = pred[1];
-				w = pred[2];
-				h = pred[3];
-				for (int c = 0; c < numClasses; ++c) {
-					float current = pred[4 + c];
-					if (current > score) {
-						score = current;
-						classId = c;
-					}
-				}
-			}
-
-			if (classId < 0) {
-				continue;
-			}
-			if (score < 0.0f || score > 1.0f) {
-				score = sigmoid(score);
-			}
-			if (score < confThreshold) {
-				continue;
-			}
-
-			float x1 = cx - 0.5f * w;
-			float y1 = cy - 0.5f * h;
-			float x2 = cx + 0.5f * w;
-			float y2 = cy + 0.5f * h;
-
-			x1 = (x1 - static_cast<float>(letterBox.padLeft)) / letterBox.scale;
-			y1 = (y1 - static_cast<float>(letterBox.padTop)) / letterBox.scale;
-			x2 = (x2 - static_cast<float>(letterBox.padLeft)) / letterBox.scale;
-			y2 = (y2 - static_cast<float>(letterBox.padTop)) / letterBox.scale;
-
-			x1 = std::clamp(x1, 0.0f, static_cast<float>(imageWidth - 1));
-			y1 = std::clamp(y1, 0.0f, static_cast<float>(imageHeight - 1));
-			x2 = std::clamp(x2, 0.0f, static_cast<float>(imageWidth - 1));
-			y2 = std::clamp(y2, 0.0f, static_cast<float>(imageHeight - 1));
-
-			Detection det;
-			det.box = cv::Rect2f(cv::Point2f(x1, y1), cv::Point2f(x2, y2));
-			det.classId = classId;
-			det.score = score;
-			detections.push_back(det);
-		}
-
-		return detections;
 	}
 
 	std::vector<Detection> nms(const std::vector<Detection>& detections, float iouThreshold) const {
@@ -580,23 +580,132 @@ private:
 		return result;
 	}
 
+	void processFeatureLayerInsight(size_t layerIdx,
+			float scale,
+			float threshold,
+			int inputH,
+			int inputW,
+			const cv::Size& originalSize,
+			std::vector<float>& allScores,
+			std::vector<float>& allBBoxes,
+			std::vector<float>& allLandmarks) const {
+		const int stride = m_featStrides_[layerIdx];
+		const auto& scoreBinding = outputBindings_[layerIdx];
+		const auto& boxBinding = outputBindings_[layerIdx + static_cast<size_t>(m_fmc_)];
+		if (scoreBinding.hostFloat.empty() || boxBinding.hostFloat.empty()) {
+			return;
+		}
+
+		const float* scores = scoreBinding.hostFloat.data();
+		const float* bboxes = boxBinding.hostFloat.data();
+
+		const int numAnchors = static_cast<int>(scoreBinding.dims.nbDims >= 2
+			? std::max(scoreBinding.dims.d[0], scoreBinding.dims.d[1])
+			: scoreBinding.dims.d[0]);
+		const int gridH = inputH / stride;
+		const int gridW = inputW / stride;
+
+		const float* landmarks = nullptr;
+		if (m_useKps_) {
+			const auto& kpsBinding = outputBindings_[layerIdx + static_cast<size_t>(m_fmc_ * 2)];
+			if (!kpsBinding.hostFloat.empty()) {
+				landmarks = kpsBinding.hostFloat.data();
+			}
+		}
+
+		for (int i = 0; i < numAnchors; ++i) {
+			const float score = scores[i];
+			if (score < threshold) {
+				continue;
+			}
+
+			const float cx = static_cast<float>(((i / 2) % gridW) * stride);
+			const float cy = static_cast<float>(((i / 2) / gridW) * stride);
+
+			const float l = bboxes[i * 4] * static_cast<float>(stride);
+			const float t = bboxes[i * 4 + 1] * static_cast<float>(stride);
+			const float r = bboxes[i * 4 + 2] * static_cast<float>(stride);
+			const float b = bboxes[i * 4 + 3] * static_cast<float>(stride);
+
+			float x1 = (cx - l) / scale;
+			float y1 = (cy - t) / scale;
+			float x2 = (cx + r) / scale;
+			float y2 = (cy + b) / scale;
+
+			x1 = std::clamp(x1, 0.0f, static_cast<float>(originalSize.width));
+			y1 = std::clamp(y1, 0.0f, static_cast<float>(originalSize.height));
+			x2 = std::clamp(x2, 0.0f, static_cast<float>(originalSize.width));
+			y2 = std::clamp(y2, 0.0f, static_cast<float>(originalSize.height));
+
+			allScores.push_back(score);
+			allBBoxes.insert(allBBoxes.end(), {x1, y1, x2, y2});
+
+			if (landmarks != nullptr) {
+				for (int k = 0; k < 5; ++k) {
+					const float lmx = (cx + landmarks[i * 10 + 2 * k] * static_cast<float>(stride)) / scale;
+					const float lmy = (cy + landmarks[i * 10 + 2 * k + 1] * static_cast<float>(stride)) / scale;
+					allLandmarks.push_back(lmx);
+					allLandmarks.push_back(lmy);
+				}
+			}
+		}
+	}
+
+	std::vector<Detection> postprocessInsight(float scale,
+			int inputH,
+			int inputW,
+			const cv::Size& originalSize,
+			float confThreshold,
+			float iouThreshold) const {
+		std::vector<float> allScores;
+		std::vector<float> allBBoxes;
+		std::vector<float> allLandmarks;
+
+		for (size_t i = 0; i < m_featStrides_.size(); ++i) {
+			processFeatureLayerInsight(i, scale, confThreshold, inputH, inputW, originalSize,
+				allScores, allBBoxes, allLandmarks);
+		}
+
+		std::vector<Detection> candidates;
+		candidates.reserve(allScores.size());
+		for (size_t i = 0; i < allScores.size(); ++i) {
+			Detection det;
+			det.box = cv::Rect2f(
+				cv::Point2f(allBBoxes[i * 4], allBBoxes[i * 4 + 1]),
+				cv::Point2f(allBBoxes[i * 4 + 2], allBBoxes[i * 4 + 3]));
+			det.classId = 0;
+			det.score = allScores[i];
+			if (m_useKps_ && allLandmarks.size() >= (i + 1) * 10) {
+				det.landmarks.reserve(5);
+				for (int k = 0; k < 5; ++k) {
+					det.landmarks.emplace_back(allLandmarks[i * 10 + 2 * k], allLandmarks[i * 10 + 2 * k + 1]);
+				}
+			}
+			candidates.push_back(std::move(det));
+		}
+
+		return nms(candidates, iouThreshold);
+	}
+
 private:
 	std::unique_ptr<nvinfer1::IRuntime, TrtDeleter<nvinfer1::IRuntime>> runtime_;
 	std::unique_ptr<nvinfer1::ICudaEngine, TrtDeleter<nvinfer1::ICudaEngine>> engine_;
 	std::unique_ptr<nvinfer1::IExecutionContext, TrtDeleter<nvinfer1::IExecutionContext>> context_;
 	std::unique_ptr<void, CudaDeleter> inputDevice_{nullptr};
-	std::unique_ptr<void, CudaDeleter> outputDevice_{nullptr};
 	nvinfer1::Dims inputDims_{};
 	nvinfer1::Dims outputDims_{};
 	nvinfer1::DataType inputType_{nvinfer1::DataType::kFLOAT};
 	std::string inputName_;
 	std::string outputName_;
+	std::vector<OutputBinding> outputBindings_;
+	std::vector<int> m_featStrides_{8, 16, 32};
+	int m_fmc_ = 3;
+	bool m_useKps_ = true;
 	size_t inputCount_ = 0;
 	size_t inputBytes_ = 0;
 	size_t outputCount_ = 0;
 	cudaStream_t stream_ = nullptr;
 	std::vector<std::uint8_t> hostInput_;
-	std::vector<float> hostOutput_;
 };
 
 }  // namespace
